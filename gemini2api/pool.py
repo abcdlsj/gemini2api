@@ -18,11 +18,17 @@ from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
 from loguru import logger
 
+from .clients import make_client
 from .config import Account, Settings
 
 
 def history_key(model: str, messages: list[dict[str, Any]]) -> str:
-    """A stable digest of one conversation prefix, used to find the chat it belongs to."""
+    """A stable digest of one conversation as it stood after a turn.
+
+    The digest covers the messages *a turn was answered from*, so a later request that replays
+    those same messages plus new ones matches the chat that already holds that context. Matching
+    is by longest prefix, because that is exactly the case: the same history, extended.
+    """
     canonical = json.dumps(
         {
             "model": model,
@@ -52,6 +58,8 @@ class StoredChat:
     model: str
     turns: int = 0
     last_used: float = field(default_factory=time.time)
+    # How much of the incoming history this chat already had, set by `find_chat`.
+    matched_messages: int = 0
     # Set when the chat was opened in auto_delete mode, so only those are ever deleted remotely.
     auto_delete: bool = False
 
@@ -75,14 +83,7 @@ class Pool:
 
     async def start(self) -> None:
         for account in self.settings.accounts:
-            client = GeminiClient(
-                secure_1psid=account.secure_1psid,
-                secure_1psidts=account.secure_1psidts,
-                proxy=account.proxy,
-            )
-            if account.impersonate:
-                client.impersonate = account.impersonate
-            self._clients[account.id] = client
+            self._clients[account.id] = make_client(account)
             self._order.append(account.id)
         await asyncio.gather(
             *(self._start_one(account) for account in self.settings.accounts),
@@ -149,15 +150,25 @@ class Pool:
 
     # -- chat records ---------------------------------------------------------------------
 
-    def find_chat(self, key: str) -> StoredChat | None:
-        chat = self._chats.get(key)
-        if chat is None:
-            return None
-        if not self._healthy(chat.account_id):
-            self._chats.pop(key, None)
-            return None
-        chat.last_used = time.time()
-        return chat
+    def find_chat(self, model: str, messages: list[dict[str, Any]]) -> StoredChat | None:
+        """The chat that already holds the longest prefix of this history, if any.
+
+        A later turn replays the transcript it was given plus what has happened since, so the
+        stored digest is of the earlier, shorter list. Ties go to the longest match: that is the
+        one carrying the most context, and therefore the fewest messages left to send.
+        """
+        for length in range(len(messages), 0, -1):
+            key = history_key(model, messages[:length])
+            chat = self._chats.get(key)
+            if chat is None:
+                continue
+            if not self._healthy(chat.account_id):
+                self._chats.pop(key, None)
+                continue
+            chat.last_used = time.time()
+            chat.matched_messages = length
+            return chat
+        return None
 
     def store_chat(self, key: str, chat: StoredChat) -> None:
         self._chats[key] = chat

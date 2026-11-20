@@ -12,18 +12,16 @@ import json
 import sys
 from typing import Any
 
-from gemini_webapi import GeminiClient
 from gemini_webapi.constants import AccountStatus
 from loguru import logger
 
-from .config import Settings, load
+from .clients import make_client
+from .config import Account, Settings, load
 
 
-async def inspect(
-    account_id: str, psid: str, psidts: str | None, proxy: str | None
-) -> dict[str, Any]:
-    client = GeminiClient(secure_1psid=psid, secure_1psidts=psidts, proxy=proxy)
-    report: dict[str, Any] = {"account": account_id}
+async def inspect(account: Account) -> dict[str, Any]:
+    client = make_client(account)
+    report: dict[str, Any] = {"account": account.id}
     try:
         await client.init(auto_refresh=False, verbose=False)
     except Exception as exc:
@@ -57,9 +55,7 @@ async def inspect(
 async def run(settings: Settings) -> int:
     reports = []
     for account in settings.accounts:
-        reports.append(
-            await inspect(account.id, account.secure_1psid, account.secure_1psidts, account.proxy)
-        )
+        reports.append(await inspect(account))
 
     print(json.dumps(reports, indent=2, ensure_ascii=False, default=str))
 
@@ -84,6 +80,12 @@ def main() -> int:
     except Exception as exc:
         logger.error(f"configuration error: {exc}")
         return 2
+    import os
+    from pathlib import Path
+
+    state = Path(settings.state_dir).expanduser()
+    state.mkdir(parents=True, exist_ok=True)
+    os.environ["GEMINI_COOKIE_PATH"] = str(state)
     return asyncio.run(run(settings))
 
 

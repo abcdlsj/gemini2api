@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
 import uvicorn
 from loguru import logger
@@ -16,6 +18,11 @@ def main() -> int:
     except Exception as exc:
         logger.error(f"configuration error: {exc}")
         return 2
+
+    # Point the library's rotated-cookie cache at a stable directory before any client exists.
+    state = Path(settings.state_dir).expanduser()
+    state.mkdir(parents=True, exist_ok=True)
+    os.environ["GEMINI_COOKIE_PATH"] = str(state)
 
     logger.info(
         f"{len(settings.accounts)} account(s), chat_mode={settings.chat_mode}, "

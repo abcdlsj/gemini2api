@@ -321,15 +321,24 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
     except prompts.PromptError as exc:
         raise _error(400, str(exc)) from exc
 
-    key = history_key(model, messages)
-    stored = pool.find_chat(key)
+    stored = pool.find_chat(model, messages)
     if stored is not None:
         account_id = stored.account_id
         client = pool.client(account_id)
         metadata = stored.metadata
+        # Only what this chat has not already been told is sent to it.
+        fresh = messages[stored.matched_messages :]
+        sent = prompts.build_prompt(
+            fresh or messages[-1:],
+            tools=tools,
+            tool_choice=choice,
+            response_format=response_format,
+            max_chars=pool.settings.max_prompt_chars,
+        )
     else:
         account_id, client = pool.next_client()
         metadata = None
+        sent = rendered
     thinking = _thinking_flag(body, pool.settings)
 
     started = time.time()
@@ -337,7 +346,7 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
         async with pool.lock(account_id):
             session = client.start_chat(metadata=metadata, model=model)
             output = await session.send_message(
-                rendered,
+                sent,
                 temporary=pool.settings.temporary,
                 extended_thinking=thinking,
             )
@@ -354,18 +363,23 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
     except prompts.PromptError as exc:
         raise _error(502, str(exc), "server_error") from exc
 
-    if stored is None:
-        pool.store_chat(
-            key,
-            StoredChat(
-                account_id=account_id,
-                metadata=list(session.metadata),
-                model=model,
-                auto_delete=pool.settings.chat_mode == "auto_delete",
-            ),
-        )
-    else:
-        stored.metadata = list(session.metadata)
+    # Record this turn's whole history, not only the first one: each later turn then matches a
+    # longer prefix, so the amount sent to Google keeps shrinking as a conversation grows.
+    metadata = list(session.metadata)
+    pool.store_chat(
+        history_key(model, messages),
+        StoredChat(
+            account_id=account_id,
+            metadata=metadata,
+            model=model,
+            turns=(stored.turns + 1) if stored else 1,
+            auto_delete=pool.settings.chat_mode == "auto_delete",
+        ),
+    )
+    if stored is not None and history_key(model, messages) != history_key(
+        model, messages[: stored.matched_messages]
+    ):
+        stored.metadata = metadata
         stored.turns += 1
 
     return {
@@ -384,7 +398,7 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
         "images": [image.url for image in (output.images or []) if getattr(image, "url", None)],
         "elapsed": round(time.time() - started, 3),
         # Character counts, not tokens: the web app reports no usage at all.
-        "prompt_chars": len(rendered),
+        "prompt_chars": len(sent),
         "reply_chars": len(reply.text),
     }
 

@@ -7,3 +7,4 @@ cookie*.txt
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+**/.gemini2api-state/

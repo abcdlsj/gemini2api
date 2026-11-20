@@ -21,7 +21,7 @@ It runs your signed-in subscription account through
 |---|---|---|
 | Quota visibility | `GET /v1/quota`, straight from Google | usually absent |
 | Thinking per request | `"thinking": true` / `reasoning.effort` | global flag, restart to change |
-| Conversation reuse | continues the Google-side chat, sends only new messages | often resends the whole history |
+| Conversation reuse | continues the Google-side chat and sends only messages it has not seen | often resends the whole history |
 | Account history | `auto_delete` keeps it clean by removing chats once idle | leaks into your history |
 | Code size | ~900 lines you can read | 10k+ lines, vendored protocol |
 
@@ -35,16 +35,33 @@ uv sync --extra dev
 
 ## Cookies
 
-The Gemini web app authenticates with cookies, not an API key. Get `__Secure-1PSID` and
-`__Secure-1PSIDTS` from a signed-in `gemini.google.com` tab:
+The Gemini web app authenticates with cookies, not an API key. **Use Firefox**, and let the server
+read them for you:
 
-1. Open `gemini.google.com` in a **private window** and sign in.
-2. DevTools → Application → Cookies → `https://gemini.google.com`.
-3. Copy `__Secure-1PSID` and `__Secure-1PSIDTS`.
+```sh
+# sign in to gemini.google.com in Firefox first
+uv run python -m gemini2api.cookies --write --proxy http://127.0.0.1:7890
+```
 
-> Use Firefox, or a private window you close immediately afterwards. Chromium's Device Bound
-> Session Credentials pin a session to the browser that created it, so a cookie copied out of a
-> normal Chrome profile dies within hours and cannot be refreshed.
+That writes every Google cookie the browser holds into `config.yaml` (mode `600`) and clears the
+rest.
+
+Three things this saves you from, all measured:
+
+- **The whole cookie jar is required.** A request carrying only `__Secure-1PSID` and
+  `__Secure-1PSIDTS`, or the classic `SID`/`SAPISID` set, is redirected to ServiceLogin even
+  though the browser session is valid. The library's docs still say two cookies are enough; they
+  are not.
+- **Chrome cannot be used.** Chromium's Device Bound Session Credentials pin the session to the
+  browser that created it, so a copied cookie is rejected immediately — not hours later. Firefox
+  does not implement DBSC.
+- **The proxy must be set.** `gemini.google.com` needs it, and `gemini-webapi`'s own redirect
+  policy reports a proxied request as `curl: (7) Redirect to internal IP 127.0.0.1 rejected
+  (SSRF protection)`, which looks like a cookie problem but is not.
+
+Manual alternative, if you would rather not have the tool read your profile: copy the full
+`Cookie` request header from a `gemini.google.com` request (DevTools → Network) and put it in
+`cookies:` as `name=value; name=value`.
 
 ## Configure
 
@@ -77,6 +94,9 @@ export G2A_API_KEY=sk-local-something
 ```sh
 uv run python -m gemini2api.doctor
 ```
+
+Runs in about ten seconds. It reports the account, the four models Google actually offers it
+(`gemini-neon`, `gemini-carbon`, `gemini-4-hydrogen`, `gemini-auto`), and the quota windows.
 
 Prints each account's sign-in state, the models it can actually use, which of them are
 subscription-only, and the quota windows. Nothing is generated, so it costs no quota — if the

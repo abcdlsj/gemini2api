@@ -24,15 +24,39 @@ def _env(name: str, default: Any, cast: type = str) -> Any:
     return raw
 
 
+def parse_cookie_string(raw: str) -> dict[str, str]:
+    """`name=value; name=value` as a mapping, which is how a browser hands cookies over."""
+    cookies: dict[str, str] = {}
+    for part in raw.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name and value:
+            cookies[name] = value
+    return cookies
+
+
 @dataclass
 class Account:
-    """One signed-in Gemini web account."""
+    """One signed-in Gemini web account.
+
+    Google now wants the whole session cookie set, not only the two PSID cookies: a request
+    carrying just `__Secure-1PSID`/`__Secure-1PSIDTS` is bounced to ServiceLogin even while the
+    browser session is valid. Anything else the account needs travels in `cookies`.
+    """
 
     id: str
     secure_1psid: str
     secure_1psidts: str | None = None
     proxy: str | None = None
     impersonate: str | None = None
+    cookies: dict[str, str] = field(default_factory=dict)
+
+    def all_cookies(self) -> dict[str, str]:
+        """Every cookie this account sends, the two PSID ones included."""
+        merged = dict(self.cookies)
+        merged["__Secure-1PSID"] = self.secure_1psid
+        if self.secure_1psidts:
+            merged["__Secure-1PSIDTS"] = self.secure_1psidts
+        return merged
 
 
 @dataclass
@@ -53,6 +77,10 @@ class Settings:
     # How long to wait on Google before giving up on one turn.
     timeout: float = 450.0
     refresh_interval: float = 600.0
+    # Where `gemini-webapi` keeps the cookies it rotates. It defaults to a temp directory, where a
+    # stale copy shadows the configured cookies and turns a valid session into a guest session;
+    # a stable path makes that cache predictable and lets it be deleted deliberately.
+    state_dir: str = ".gemini2api-state"
 
     @property
     def temporary(self) -> bool:
@@ -70,12 +98,20 @@ def _account_from(raw: dict[str, Any], index: int) -> Account:
     psid = raw.get("secure_1psid")
     if not psid:
         raise ValueError(f"account {account_id!r}: secure_1psid is required")
+    extra = raw.get("cookies") or {}
+    if isinstance(extra, str):
+        extra = parse_cookie_string(extra)
+    if not isinstance(extra, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in extra.items()
+    ):
+        raise ValueError(f"account {account_id!r}: cookies must be a mapping of name to value")
     return Account(
         id=account_id,
         secure_1psid=str(psid),
         secure_1psidts=raw.get("secure_1psidts") or None,
         proxy=raw.get("proxy") or None,
         impersonate=raw.get("impersonate") or None,
+        cookies=dict(extra),
     )
 
 
@@ -102,6 +138,8 @@ def load(path: str | Path | None = None) -> Settings:
                 secure_1psid=env_psid,
                 secure_1psidts=os.getenv("G2A_SECURE_1PSIDTS") or None,
                 proxy=os.getenv("G2A_PROXY") or None,
+                impersonate=os.getenv("G2A_IMPERSONATE") or None,
+                cookies=parse_cookie_string(os.getenv("G2A_COOKIES") or ""),
             )
         ]
     if not accounts:
@@ -121,6 +159,7 @@ def load(path: str | Path | None = None) -> Settings:
         max_prompt_chars=_env("MAX_PROMPT_CHARS", raw.get("max_prompt_chars", 900_000), int),
         timeout=float(_env("TIMEOUT", raw.get("timeout", 450.0), str)),
         refresh_interval=float(_env("REFRESH_INTERVAL", raw.get("refresh_interval", 600.0), str)),
+        state_dir=_env("STATE_DIR", raw.get("state_dir", ".gemini2api-state"), str),
     )
     if settings.chat_mode not in {"normal", "temporary", "auto_delete"}:
         raise ValueError(

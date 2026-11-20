@@ -11,6 +11,7 @@ from gemini_webapi.constants import AccountStatus
 
 from gemini2api import prompt as prompts
 from gemini2api.config import Account, Settings
+from gemini2api.pool import history_key
 from gemini2api.server import create_app
 
 # -- prompt rendering ---------------------------------------------------------------------
@@ -395,8 +396,13 @@ class _FakePool:
 
         return asyncio.Lock()
 
-    def find_chat(self, key: str):
-        return self._chats.get(key)
+    def find_chat(self, model: str, messages: list[dict[str, Any]]):
+        for length in range(len(messages), 0, -1):
+            found = self._chats.get(history_key(model, messages[:length]))
+            if found is not None:
+                found.matched_messages = length
+                return found
+        return None
 
     def store_chat(self, key, chat) -> None:
         self._chats[key] = chat
@@ -465,3 +471,49 @@ class _client:
     def __exit__(self, *exc: Any) -> None:
         self._client_ctx.__exit__(*exc)
         self._restore()
+
+
+def test_a_later_turn_only_sends_what_the_chat_has_not_seen():
+    """The point of storing a chat: turn two must not resend turn one's transcript."""
+    first = [{"role": "user", "content": "my number is 42"}]
+    second = [
+        *first,
+        {"role": "assistant", "content": "noted"},
+        {"role": "user", "content": "which?"},
+    ]
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": first},
+        )
+        first_prompt = _recorder["prompt"]
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": second},
+        )
+        second_prompt = _recorder["prompt"]
+    assert "my number is 42" in first_prompt
+    # The follow-up asks about turn one without repeating it: the chat already holds it.
+    assert "my number is 42" not in second_prompt
+    assert "which?" in second_prompt
+
+
+def test_a_new_conversation_still_carries_its_whole_history():
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "messages": [
+                    {"role": "user", "content": "first question"},
+                    {"role": "assistant", "content": "first answer"},
+                    {"role": "user", "content": "second question"},
+                ],
+            },
+        )
+        prompt = _recorder["prompt"]
+    assert "first question" in prompt
+    assert "second question" in prompt

@@ -8,8 +8,13 @@ accounts:
   - id: "ultra"
     secure_1psid: "PASTE___Secure-1PSID___HERE"
     secure_1psidts: "PASTE___Secure-1PSIDTS___HERE"
-    # proxy: "http://127.0.0.1:7890"   # per-account, if Google needs a specific egress
+    proxy: "http://127.0.0.1:7890"   # gemini.google.com is unreachable without it here
     # impersonate: "chrome"            # curl_cffi browser fingerprint
+    # Every other Google cookie the browser holds. `python -m gemini2api.cookies --write`
+    # fills this in; two PSID cookies alone are not enough any more.
+    # cookies:
+    #   SID: "..."
+    #   SAPISID: "..."
 
 # Leave empty to disable auth (only safe on loopback).
 api_key: ""
@@ -26,3 +31,6 @@ default_thinking: false
 max_prompt_chars: 900000
 timeout: 450
 refresh_interval: 600
+# Where the library caches the cookies it rotates. A temp directory leaves a stale copy behind
+# that shadows the configured cookies and turns a valid session into a guest session.
+state_dir: ".gemini2api-state"
