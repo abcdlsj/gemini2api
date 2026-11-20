@@ -1,0 +1,28 @@
+# Copy to config.yaml and `chmod 600 config.yaml`.
+#
+# Cookies: open gemini.google.com in a private window (Firefox preferred — Chromium's Device
+# Bound Session Credentials make copied cookies die within hours), then
+# DevTools → Application → Cookies → copy __Secure-1PSID and __Secure-1PSIDTS.
+
+accounts:
+  - id: "ultra"
+    secure_1psid: "PASTE___Secure-1PSID___HERE"
+    secure_1psidts: "PASTE___Secure-1PSIDTS___HERE"
+    # proxy: "http://127.0.0.1:7890"   # per-account, if Google needs a specific egress
+    # impersonate: "chrome"            # curl_cffi browser fingerprint
+
+# Leave empty to disable auth (only safe on loopback).
+api_key: ""
+
+host: "127.0.0.1"
+port: 8790
+
+# normal | temporary | auto_delete
+#   auto_delete keeps context reliable and still cleans up the Google account afterwards.
+chat_mode: "auto_delete"
+auto_delete_ttl: 86400
+
+default_thinking: false
+max_prompt_chars: 900000
+timeout: 450
+refresh_interval: 600

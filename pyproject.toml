@@ -1,0 +1,34 @@
+[project]
+name = "gemini2api"
+version = "0.1.0"
+description = "OpenAI-compatible API over the Gemini web app, tuned for quota visibility and per-request thinking control"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "pyyaml>=6.0",
+    "jsonschema>=4.21",
+    "gemini-webapi>=2.1.1,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx", "ruff"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["gemini2api*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RET", "RUF"]
+# Depends() in a signature default is how FastAPI declares dependencies.
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
