@@ -86,6 +86,11 @@ class Settings:
     def temporary(self) -> bool:
         return self.chat_mode == "temporary"
 
+    @property
+    def keys_path(self) -> Path:
+        """Minted keys sit with the rotating cookies, not in the hand-edited config."""
+        return Path(self.state_dir) / "keys.json"
+
     def account(self, account_id: str) -> Account:
         for account in self.accounts:
             if account.id == account_id:

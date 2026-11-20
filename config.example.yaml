@@ -16,7 +16,8 @@ accounts:
     #   SID: "..."
     #   SAPISID: "..."
 
-# Leave empty to disable auth (only safe on loopback).
+# Leave empty to disable auth (only safe on loopback). Clients can mint their own keys with
+# `POST /v1/keys`; those live in state_dir/keys.json and are accepted alongside this one.
 api_key: ""
 
 host: "127.0.0.1"

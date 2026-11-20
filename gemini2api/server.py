@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -30,7 +31,9 @@ from gemini_webapi.exceptions import (
 from loguru import logger
 
 from . import prompt as prompts
+from ._version import __version__
 from .config import Settings, load
+from .keys import KeyStore
 from .pool import Pool, StoredChat, history_key
 
 SSE_DONE = "data: [DONE]\n\n"
@@ -68,6 +71,16 @@ def _upstream_error(exc: Exception) -> HTTPException:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or load()
+    minted = KeyStore(resolved.keys_path)
+    # Vision is not wired: `image_url` parts are parsed and then dropped, so saying otherwise
+    # would make a client send images that never reach Gemini.
+    capabilities = {
+        "supports_vision": False,
+        "supports_reasoning": True,
+    }
+    # The prompt is cut at `max_prompt_chars`, so that is the budget a client should plan with
+    # (four characters per token is the usual rough conversion).
+    context_window = max(1, resolved.max_prompt_chars // 4)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -87,16 +100,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_pool(request: Request) -> Pool:
         return request.app.state.pool
 
+    def key_required() -> bool:
+        """Auth applies when the operator set a key, or when any client has minted one."""
+        return bool(resolved.api_key) or bool(minted)
+
     def require_key(request: Request) -> None:
-        if not resolved.api_key:
+        if not key_required():
             return
         header = request.headers.get("authorization", "")
         scheme, _, token = header.partition(" ")
         supplied = token if scheme.lower() == "bearer" else request.headers.get("x-api-key")
         if not supplied:
             raise _error(401, "missing API key", "authentication_error")
-        if supplied != resolved.api_key:
-            raise _error(403, "wrong API key", "permission_error")
+        if resolved.api_key and secrets.compare_digest(supplied, resolved.api_key):
+            return
+        if minted.verify(supplied):
+            return
+        raise _error(403, "wrong API key", "permission_error")
 
     @app.exception_handler(HTTPException)
     async def http_error(_: Request, exc: HTTPException):
@@ -110,7 +130,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health(pool: Pool = Depends(get_pool)):
-        return pool.health()
+        """Unsigned-in state, plus what a client needs to recognise and configure this server."""
+        return {
+            "server": "gemini2api",
+            "version": __version__,
+            "key_required": key_required(),
+            "api": {
+                "protocol": "openai-completions",
+                "base_path": "/v1",
+                **capabilities,
+                "context_window": context_window,
+            },
+            **pool.health(),
+        }
 
     @app.get("/v1/models", dependencies=[Depends(require_key)])
     async def list_models(pool: Pool = Depends(get_pool)):
@@ -123,6 +155,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "owned_by": "google",
                 # Not an OpenAI field, but the reason to run this server: which account tiers
                 # can serve the model, and whether it is a subscription-only one.
+                # Also not OpenAI fields: what a client needs to advertise the model without
+                # asking the user to fill in numbers by hand.
+                "context_window": context_window,
+                **capabilities,
                 "gemini": {
                     "display_name": model["display_name"],
                     "description": model["description"],
@@ -147,6 +183,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "chat_mode": resolved.chat_mode,
             "auto_delete_ttl": resolved.auto_delete_ttl,
         }
+
+    @app.post("/v1/keys", status_code=201, dependencies=[Depends(require_key)])
+    async def mint_key(request: Request):
+        """Issue a key for one client. The plaintext is returned once and stored nowhere."""
+        body = await _optional_json_body(request)
+        label = body.get("label")
+        if label is not None and not isinstance(label, str):
+            raise _error(400, "label must be a string")
+        return minted.mint(label)
+
+    @app.get("/v1/keys", dependencies=[Depends(require_key)])
+    async def list_keys():
+        return {"object": "list", "data": minted.keys()}
+
+    @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_key)])
+    async def revoke_key(key_id: str):
+        if not minted.revoke(key_id):
+            raise _error(404, f"no minted key with id {key_id!r}", "not_found_error")
+        return {"revoked": key_id}
 
     @app.post("/v1/chat/completions", dependencies=[Depends(require_key)])
     async def chat_completions(request: Request, pool: Pool = Depends(get_pool)):
@@ -193,6 +248,20 @@ async def _reap_loop(pool: Pool) -> None:
         except Exception as exc:
             logger.warning(f"cleanup pass failed: {exc}")
         await asyncio.sleep(min(3600, max(60, pool.settings.auto_delete_ttl // 2)))
+
+
+async def _optional_json_body(request: Request) -> dict[str, Any]:
+    """A body that may be absent or empty, which is how a bare mint request arrives."""
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError as exc:
+        raise _error(400, f"request body is not valid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise _error(400, "request body must be a JSON object")
+    return body
 
 
 async def _json_body(request: Request) -> dict[str, Any]:

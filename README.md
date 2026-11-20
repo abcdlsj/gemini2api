@@ -13,7 +13,10 @@ It runs your signed-in subscription account through
 | `GET /v1/models` | Every model **your account** offers, with tier info |
 | `GET /v1/quota` | Plan, quota windows and usage, read from Google |
 | `GET /v1/chats` | How many conversations are being continued |
-| `GET /health` | Per-account sign-in state |
+| `GET /health` | Sign-in state, plus the version and capabilities a client negotiates with |
+| `POST /v1/keys` | Mint a key for one client (authenticated by an existing key) |
+| `GET /v1/keys` | Minted keys, prefixes only |
+| `DELETE /v1/keys/{id}` | Revoke one |
 
 ## Why another one
 
@@ -137,6 +140,45 @@ listed — an Ultra account and a free account can both see `gemini-neon`, and o
 tells them apart.
 
 Then point any OpenAI client at `http://127.0.0.1:8790/v1` with the model name from `/v1/models`.
+
+## Keys
+
+`api_key` is the operator's key. A client — Kip, for instance — does not have to keep it: it
+presents it once and mints its own.
+
+```sh
+curl -s -X POST localhost:8790/v1/keys \
+  -H "authorization: Bearer $G2A_API_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"label":"kip"}'
+# {"id":"3f2a...","label":"kip","prefix":"g2k-AbCdEf","created_at":1770000000,"key":"g2k-..."}
+```
+
+The plaintext is returned once and never stored — only its SHA-256, in
+`state_dir/keys.json` (mode 600). Minted keys are accepted anywhere `api_key` is, and
+`DELETE /v1/keys/{id}` revokes one without disturbing the others. Minting itself requires a
+key that already works: loopback is not a way to hand yourself quota.
+
+Once a key exists, `/health` reports `key_required: true` and every `/v1` route needs one.
+
+## Negotiation
+
+A client that finds this server can configure itself from two responses — nothing has to be
+typed in by hand except the port:
+
+```json
+// GET /health
+{"server": "gemini2api", "version": "0.1.0", "key_required": true,
+ "api": {"protocol": "openai-completions", "base_path": "/v1",
+         "supports_vision": false, "supports_reasoning": true, "context_window": 225000},
+ "accounts": {"ultra": {"signed_in": true, "status": "AVAILABLE"}}, "chats": 0, "closed": 0}
+```
+
+`GET /v1/models` carries the same `context_window`, `supports_vision` and
+`supports_reasoning` per model, so a client can advertise them without inventing numbers.
+`supports_vision` is `false` on purpose: image parts are parsed and then dropped, so claiming
+otherwise would make a client send images that never reach Gemini. `context_window` is
+`max_prompt_chars / 4`, the budget the server itself enforces.
 
 ## Thinking control
 

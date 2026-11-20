@@ -182,6 +182,27 @@ def test_models_reports_what_the_account_offers():
     assert body["data"][0]["gemini"]["advanced_only"] is True
 
 
+def test_models_carry_the_metadata_a_client_needs_to_advertise_them():
+    """Otherwise every caller invents a context window and a vision flag for itself."""
+    with _client() as client:
+        model = client.get("/v1/models", headers=_auth()).json()["data"][0]
+    assert model["context_window"] == 225_000
+    assert model["supports_reasoning"] is True
+    # `image_url` parts are parsed and dropped, so claiming vision would be a lie.
+    assert model["supports_vision"] is False
+
+
+def test_health_identifies_the_server_before_anything_is_configured():
+    with _client() as client:
+        body = client.get("/health").json()
+    assert body["server"] == "gemini2api"
+    assert body["version"]
+    assert body["key_required"] is True
+    assert body["api"]["protocol"] == "openai-completions"
+    assert body["api"]["base_path"] == "/v1"
+    assert body["accounts"]["acct"]["signed_in"] is True
+
+
 def test_quota_returns_the_account_report():
     with _client() as client:
         body = client.get("/v1/quota", headers=_auth()).json()
@@ -283,6 +304,42 @@ def test_a_missing_key_is_refused_when_one_is_configured():
         assert client.get("/v1/models").status_code == 401
         wrong = client.get("/v1/models", headers={"authorization": "Bearer wrong"})
         assert wrong.status_code == 403
+
+
+def test_minting_a_key_needs_a_key_already(tmp_path):
+    """Loopback must not be a way to hand yourself a key."""
+    with _client(_settings_with_state(tmp_path)) as client:
+        assert client.post("/v1/keys", json={"label": "kip"}).status_code == 401
+
+
+def test_a_minted_key_works_on_its_own_and_can_be_revoked(tmp_path):
+    settings = _settings_with_state(tmp_path)
+    with _client(settings) as client:
+        minted = client.post("/v1/keys", headers=_auth(), json={"label": "kip"}).json()
+        assert minted["key"].startswith("g2k-")
+        assert minted["label"] == "kip"
+        as_client = {"authorization": f"Bearer {minted['key']}"}
+        assert client.get("/v1/models", headers=as_client).status_code == 200
+        listed = client.get("/v1/keys", headers=_auth()).json()["data"]
+        assert [entry["id"] for entry in listed] == [minted["id"]]
+        assert "key" not in listed[0]
+        assert client.delete(f"/v1/keys/{minted['id']}", headers=_auth()).status_code == 200
+        assert client.get("/v1/models", headers=as_client).status_code == 403
+
+
+def test_a_minted_key_survives_a_restart(tmp_path):
+    settings = _settings_with_state(tmp_path)
+    with _client(settings) as client:
+        key = client.post("/v1/keys", headers=_auth(), json={}).json()["key"]
+    with _client(settings) as client:
+        as_client = {"authorization": f"Bearer {key}"}
+        assert client.get("/v1/models", headers=as_client).status_code == 200
+
+
+def test_revoking_an_unknown_key_is_a_404(tmp_path):
+    with _client(_settings_with_state(tmp_path)) as client:
+        response = client.delete("/v1/keys/nope", headers=_auth())
+    assert response.status_code == 404
 
 
 def test_an_unsupported_input_item_is_a_400():
@@ -458,10 +515,13 @@ def _settings() -> Settings:
 class _client:
     """A TestClient wired to a fake pool instead of real accounts."""
 
+    def __init__(self, settings: Settings | None = None) -> None:
+        self._settings = settings
+
     def __enter__(self) -> TestClient:
         import gemini2api.server as server
 
-        app = create_app(_settings())
+        app = create_app(self._settings or _settings())
         original = server.Pool
         server.Pool = _FakePool  # type: ignore[misc]
         self._restore = lambda: setattr(server, "Pool", original)
@@ -471,6 +531,13 @@ class _client:
     def __exit__(self, *exc: Any) -> None:
         self._client_ctx.__exit__(*exc)
         self._restore()
+
+
+def _settings_with_state(tmp_path) -> Settings:
+    """The usual settings, with minted keys written into the test's own directory."""
+    settings = _settings()
+    settings.state_dir = str(tmp_path)
+    return settings
 
 
 def test_a_later_turn_only_sends_what_the_chat_has_not_seen():
