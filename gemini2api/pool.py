@@ -251,11 +251,26 @@ class Pool:
                 continue
             client = self._clients[account_id]
             status = client.account_status
+            usage = client.usage_info or {}
+            # `usage_info.tier` is Google's own plan label (FREE / PRO / ULTRA); nothing here
+            # infers a plan from which models happen to be listed.
+            tier = usage.get("tier") or {}
             report[account_id] = {
                 "signed_in": True,
                 "status": status.name,
+                "plan": tier.get("label"),
+                "plan_id": tier.get("id"),
+                # The binding window, then every window on its own.
+                "windows": {
+                    name: {
+                        "usage_percentage": value.get("usage_percentage"),
+                        "remaining_credits": value.get("remaining_credits"),
+                        "reset_at": value.get("reset_at"),
+                    }
+                    for name, value in usage.items()
+                    if isinstance(value, dict) and "window" in value
+                },
                 "quotas": client.quotas,
-                "usage": client.usage_info,
             }
         return report
 

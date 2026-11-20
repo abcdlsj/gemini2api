@@ -114,6 +114,28 @@ curl -s localhost:8790/v1/models -H "authorization: Bearer $G2A_API_KEY" | jq
 curl -s localhost:8790/v1/quota  -H "authorization: Bearer $G2A_API_KEY" | jq
 ```
 
+`/v1/quota` reports the plan Google has on the account and every quota window:
+
+```json
+{
+  "firefox": {
+    "signed_in": true,
+    "plan": "ULTRA",
+    "plan_id": 6,
+    "windows": {
+      "current_5h": { "usage_percentage": 5, "remaining_credits": 11375,
+                      "reset_at": "2026-11-20T23:18:25+08:00" },
+      "weekly":     { "usage_percentage": 0, "remaining_credits": 241202,
+                      "reset_at": "2026-11-27T11:18:25+08:00" }
+    }
+  }
+}
+```
+
+The plan label comes from Google's `usage_info.tier`, not from which models happen to be
+listed — an Ultra account and a free account can both see `gemini-neon`, and only the tier
+tells them apart.
+
 Then point any OpenAI client at `http://127.0.0.1:8790/v1` with the model name from `/v1/models`.
 
 ## Thinking control

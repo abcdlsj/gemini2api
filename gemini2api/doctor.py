@@ -45,8 +45,20 @@ async def inspect(account: Account) -> dict[str, Any]:
             for model in models
         ]
         report["advanced_models"] = [m["name"] for m in report["models"] if m["advanced_only"]]
+        usage = client.usage_info or {}
+        tier = usage.get("tier") or {}
+        report["plan"] = tier.get("label")
+        report["plan_id"] = tier.get("id")
+        report["windows"] = {
+            name: {
+                "usage_percentage": value.get("usage_percentage"),
+                "remaining_credits": value.get("remaining_credits"),
+                "reset_at": value.get("reset_at"),
+            }
+            for name, value in usage.items()
+            if isinstance(value, dict) and "window" in value
+        }
         report["quotas"] = client.quotas
-        report["usage"] = client.usage_info
         return report
     finally:
         await client.close()
@@ -66,11 +78,8 @@ async def run(settings: Settings) -> int:
             logger.error(f"account {report['account']}: {reason}")
         return 1
     for report in reports:
-        if not report.get("advanced_models"):
-            logger.warning(
-                f"account {report['account']}: no subscription-only model is offered. "
-                "The cookies may belong to a free account, or the tier is not what you expect."
-            )
+        if report.get("plan"):
+            logger.info(f"account {report['account']}: plan {report['plan']}")
     return 0
 
 
