@@ -59,6 +59,19 @@ def _content_text(content: Any) -> str:
     return "\n".join(pieces)
 
 
+def count_images(messages: list[dict[str, Any]]) -> int:
+    """How many images the transcript referenced.
+
+    None of them reach Gemini: `gemini-webapi` names every in-memory upload `input_NNNNNNN.txt`
+    and derives the content type from that, so an image is announced as text/plain and the
+    generation request never answers. The caller is told, rather than the image silently
+    vanishing from the prompt.
+    """
+    return sum(
+        len(image_urls(message.get("content"))) for message in messages if isinstance(message, dict)
+    )
+
+
 def image_urls(content: Any) -> list[str]:
     """The image URLs in one message, in order."""
     if not isinstance(content, list):
@@ -184,6 +197,13 @@ def build_prompt(
     structured = build_structured_instruction(response_format)
     if structured:
         preamble.append(structured)
+
+    images = count_images(messages)
+    if images:
+        preamble.append(
+            f"# Footnote\nThe caller attached {images} image(s), which this gateway cannot "
+            "pass on. Say so plainly if they matter; never invent what an unseen image shows."
+        )
 
     prompt = ""
     if preamble:

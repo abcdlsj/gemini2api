@@ -222,6 +222,10 @@ silently empty turn.
 
 ## Honest limits
 
+- **No image input.** `gemini-webapi` names every in-memory upload `input_NNNNNNN.txt` and
+  derives the content type from that, so an image is announced to Google as `text/plain` and the
+  generation request never answers. `/v1/models` therefore reports `supports_vision: false`, and a
+  turn that carries an image tells the model one was attached instead of pretending to see it.
 - **Token counts are characters.** The web app reports no usage, so `usage` fields are character
   counts. Fine for context budgeting, wrong for billing.
 - **`temperature`, `top_p`, `max_tokens` do nothing.** The web app exposes no sampling controls;

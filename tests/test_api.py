@@ -188,7 +188,8 @@ def test_models_carry_the_metadata_a_client_needs_to_advertise_them():
         model = client.get("/v1/models", headers=_auth()).json()["data"][0]
     assert model["context_window"] == 225_000
     assert model["supports_reasoning"] is True
-    # `image_url` parts are parsed and dropped, so claiming vision would be a lie.
+    # Images cannot reach Gemini yet, so claiming vision would be a lie; Kip reads this flag
+    # and hides its attach button accordingly.
     assert model["supports_vision"] is False
 
 
@@ -384,9 +385,12 @@ def _reset_recorder():
 class _FakeSession:
     metadata: ClassVar[list[str]] = ["c_chat", "r_reply", "rc_candidate"]
 
-    async def send_message(self, text, temporary=False, extended_thinking=False, **kwargs):
+    async def send_message(self, text, files=None, temporary=False, extended_thinking=False, **kw):
         _recorder["thinking"] = extended_thinking
         _recorder["prompt"] = text
+        uploaded = list(files or [])
+        _recorder["file_count"] = len(uploaded)
+        _recorder["file_bytes"] = uploaded[0].read() if uploaded else b""
         return _FakeOutput(_recorder.get("reply", "hello"))
 
 
@@ -584,3 +588,60 @@ def test_a_new_conversation_still_carries_its_whole_history():
         prompt = _recorder["prompt"]
     assert "first question" in prompt
     assert "second question" in prompt
+
+
+def test_an_attached_image_is_reported_to_the_model_not_dropped_silently():
+    """Images do not reach Gemini yet; the turn says so instead of answering blind."""
+    png = (
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    with _client() as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "what is this"},
+                            {"type": "image_url", "image_url": {"url": png}},
+                        ],
+                    }
+                ],
+            },
+        )
+        prompt = _recorder["prompt"]
+    assert response.status_code == 200
+    assert "attached 1 image(s)" in prompt
+    assert _recorder["file_count"] == 0
+
+
+def test_a_remote_image_url_is_not_fetched():
+    """Fetching it server-side would make a chat request into an SSRF primitive."""
+    with _client() as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "what is this"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "http://169.254.169.254/latest/meta-data"},
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+        prompt = _recorder["prompt"]
+    assert response.status_code == 200
+    assert "attached 1 image(s)" in prompt
+    assert _recorder["file_count"] == 0

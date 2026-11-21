@@ -72,8 +72,9 @@ def _upstream_error(exc: Exception) -> HTTPException:
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or load()
     minted = KeyStore(resolved.keys_path)
-    # Vision is not wired: `image_url` parts are parsed and then dropped, so saying otherwise
-    # would make a client send images that never reach Gemini.
+    # Vision is advertised as false until images actually reach Gemini. `gemini-webapi` names
+    # every in-memory upload `input_NNNNNNN.txt` and derives the content type from that, so an
+    # image is announced to Google as text/plain and the generation request never answers.
     capabilities = {
         "supports_vision": False,
         "supports_reasoning": True,

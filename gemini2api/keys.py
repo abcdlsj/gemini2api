@@ -72,9 +72,7 @@ class KeyStore:
 
     def verify(self, token: str) -> bool:
         supplied = digest(token)
-        return any(
-            secrets.compare_digest(entry["sha256"], supplied) for entry in self._entries
-        )
+        return any(secrets.compare_digest(entry["sha256"], supplied) for entry in self._entries)
 
     def mint(self, label: str | None = None) -> dict[str, Any]:
         """A new key. The plaintext appears in the return value and is never stored."""
