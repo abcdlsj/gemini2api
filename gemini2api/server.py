@@ -148,29 +148,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/models", dependencies=[Depends(require_key)])
     async def list_models(pool: Pool = Depends(get_pool)):
         now = int(time.time())
-        data = [
-            {
-                "id": model["name"],
-                "object": "model",
-                "created": now,
-                "owned_by": "google",
-                # Not an OpenAI field, but the reason to run this server: which account tiers
-                # can serve the model, and whether it is a subscription-only one.
-                # Also not OpenAI fields: what a client needs to advertise the model without
-                # asking the user to fill in numbers by hand.
-                "name": model["display_name"],
-                "context_window": context_window,
-                **capabilities,
-                "gemini": {
-                    "display_name": model["display_name"],
-                    "description": model["description"],
-                    "advanced_only": model["advanced"],
-                    "accounts": model["accounts"],
-                },
-            }
-            for model in pool.models()
-        ]
+        data = []
+        for model in pool.models():
+            for suffix, name_suffix in (("", ""), (TEMPORARY_SUFFIX, " (temporary)")):
+                data.append(
+                    _model_entry(
+                        model,
+                        f"{model['name']}{suffix}",
+                        f"{model['display_name']}{name_suffix}",
+                        now,
+                    )
+                )
         return {"object": "list", "data": data}
+
+    def _model_entry(model: dict[str, Any], model_id: str, display: str, now: int) -> dict:
+        return {
+            "id": model_id,
+            "object": "model",
+            "created": now,
+            "owned_by": "google",
+            # Not an OpenAI field, but the reason to run this server: which account tiers
+            # can serve the model, and whether it is a subscription-only one.
+            # Also not OpenAI fields: what a client needs to advertise the model without
+            # asking the user to fill in numbers by hand.
+            "name": display,
+            "context_window": context_window,
+            **capabilities,
+            "gemini": {
+                "display_name": display,
+                "description": model["description"],
+                "advanced_only": model["advanced"],
+                "temporary": model_id.endswith(TEMPORARY_SUFFIX),
+                "accounts": model["accounts"],
+            },
+        }
 
     @app.get("/v1/quota", dependencies=[Depends(require_key)])
     async def quota(pool: Pool = Depends(get_pool)):
@@ -342,6 +353,21 @@ def _responses_to_chat(body: dict[str, Any]) -> dict[str, Any]:
     return translated
 
 
+def _temporary_flag(body: dict[str, Any], settings: Settings) -> bool:
+    """Whether this turn should stay out of the account's Gemini history.
+
+    Per request, so one client can mix: `"temporary": true` on a request, or the server-wide
+    `chat_mode`. A temporary turn is never stored locally either, because the chat it opens
+    cannot be continued anyway - Google closes the window at will and the context is lost.
+    """
+    raw = body.get("temporary")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return settings.temporary
+
+
 def _thinking_flag(body: dict[str, Any], settings: Settings) -> bool:
     """Whether this turn asks for extended thinking.
 
@@ -362,10 +388,18 @@ def _thinking_flag(body: dict[str, Any], settings: Settings) -> bool:
     return settings.default_thinking
 
 
+TEMPORARY_SUFFIX = "-temp"
+
+
 def _model_name(body: dict[str, Any]) -> str:
     model = body.get("model")
     if not isinstance(model, str) or not model:
         raise _error(400, "model is required")
+    if model.endswith(TEMPORARY_SUFFIX):
+        # `gemini-neon-temp` keeps a model's behaviour and changes only where the chat is kept,
+        # which is the one thing a client like Kip cannot express through the request body.
+        body["temporary"] = True
+        return model[: -len(TEMPORARY_SUFFIX)]
     return model
 
 
@@ -392,7 +426,8 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
     except prompts.PromptError as exc:
         raise _error(400, str(exc)) from exc
 
-    stored = pool.find_chat(model, messages)
+    temporary = _temporary_flag(body, pool.settings)
+    stored = None if temporary else pool.find_chat(model, messages)
     if stored is not None:
         account_id = stored.account_id
         client = pool.client(account_id)
@@ -418,7 +453,7 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
             session = client.start_chat(metadata=metadata, model=model)
             output = await session.send_message(
                 sent,
-                temporary=pool.settings.temporary,
+                temporary=temporary,
                 extended_thinking=thinking,
             )
     except Exception as exc:
@@ -433,6 +468,24 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
         content = prompts.validate_structured(reply.text, response_format)
     except prompts.PromptError as exc:
         raise _error(502, str(exc), "server_error") from exc
+
+    # A temporary chat is never recorded: continuing it is not possible, so claiming to hold it
+    # would only mislead the next request into sending a fragment of the conversation.
+    if temporary:
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "created": int(started),
+            "model": model,
+            "account": account_id,
+            "content": content,
+            "calls": reply.calls,
+            "thoughts": output.thoughts or None,
+            "citations": [],
+            "images": [image.url for image in (output.images or []) if getattr(image, "url", None)],
+            "elapsed": round(time.time() - started, 3),
+            "prompt_chars": len(sent),
+            "reply_chars": len(reply.text),
+        }
 
     # Record this turn's whole history, not only the first one: each later turn then matches a
     # longer prefix, so the amount sent to Google keeps shrinking as a conversation grows.

@@ -180,6 +180,21 @@ typed in by hand except the port:
 otherwise would make a client send images that never reach Gemini. `context_window` is
 `max_prompt_chars / 4`, the budget the server itself enforces.
 
+## Temporary chats
+
+Every model is listed twice: `gemini-neon` keeps its chat in the Gemini account, so the context
+survives across turns, and `gemini-neon-temp` keeps nothing there. A temporary turn is also never
+recorded locally, because the chat it opens cannot be continued — Google may close the window at
+any time and the context with it.
+
+The same switch works per request, for clients that model it directly:
+
+```json
+{"model": "gemini-neon", "temporary": true, "messages": [...]}
+```
+
+The `-temp` suffix is only a storage choice; the model behind it is the same one.
+
 ## Thinking control
 
 Per request, no restart:

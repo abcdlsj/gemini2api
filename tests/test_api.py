@@ -387,6 +387,7 @@ class _FakeSession:
 
     async def send_message(self, text, files=None, temporary=False, extended_thinking=False, **kw):
         _recorder["thinking"] = extended_thinking
+        _recorder["temporary"] = temporary
         _recorder["prompt"] = text
         uploaded = list(files or [])
         _recorder["file_count"] = len(uploaded)
@@ -645,3 +646,70 @@ def test_a_remote_image_url_is_not_fetched():
     assert response.status_code == 200
     assert "attached 1 image(s)" in prompt
     assert _recorder["file_count"] == 0
+
+
+def test_a_temporary_turn_is_not_recorded_and_never_reused():
+    """Google may close a temporary chat at will, so continuing one would lose context."""
+    with _client() as client:
+        first = client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "temporary": True,
+                "messages": [{"role": "user", "content": "hold this"}],
+            },
+        )
+        assert _recorder["temporary"] is True
+        after_first = client.get("/v1/chats", headers=_auth()).json()["count"]
+        # A follow-up that replays the first turn must not try to continue it.
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "temporary": True,
+                "messages": [
+                    {"role": "user", "content": "hold this"},
+                    {"role": "assistant", "content": "hello"},
+                    {"role": "user", "content": "and this"},
+                ],
+            },
+        )
+        prompt = _recorder["prompt"]
+        after_second = client.get("/v1/chats", headers=_auth()).json()["count"]
+    assert first.status_code == 200
+    assert after_first == 0
+    assert after_second == 0
+    # Nothing was reused, so the whole conversation was sent.
+    assert "hold this" in prompt
+
+
+def test_an_ordinary_turn_is_still_recorded():
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert _recorder["temporary"] is False
+        assert client.get("/v1/chats", headers=_auth()).json()["count"] == 1
+
+
+def test_a_model_suffixed_temp_is_the_same_model_kept_nowhere():
+    with _client() as client:
+        listing = client.get("/v1/models", headers=_auth()).json()["data"]
+        ids = {entry["id"] for entry in listing}
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web-temp", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        temporary = _recorder["temporary"]
+        # The suffix is a storage choice, not a different model.
+        assert _recorder["prompt"]
+        chats = client.get("/v1/chats", headers=_auth()).json()["count"]
+    assert "gemini-pro-web" in ids
+    assert "gemini-pro-web-temp" in ids
+    assert temporary is True
+    assert chats == 0
