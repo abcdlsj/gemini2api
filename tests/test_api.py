@@ -413,6 +413,7 @@ class _FakeClient:
         return [_FakeModel()]
 
     def start_chat(self, metadata=None, model=None, **kwargs):
+        _recorder["metadata"] = metadata
         return _FakeSession()
 
     @property
@@ -715,3 +716,297 @@ def test_a_model_suffixed_temp_is_the_same_model_kept_nowhere():
     assert "gemini-pro-web-temp" in ids
     assert temporary is True
     assert chats == 0
+
+
+# -- system prompt persistence across reused chats ----------------------------------------
+
+
+def test_build_prompt_explicit_system_deduplicates_and_enforces_max_chars():
+    rendered = prompts.build_prompt(
+        [
+            {"role": "system", "content": "Be brief."},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "developer", "content": "Use metric."},
+            {"role": "user", "content": "Second question"},
+        ],
+        system=["You are Kip.", "Be brief."],
+    )
+    assert rendered.count("You are Kip.") == 1
+    assert rendered.count("Be brief.") == 1
+    assert rendered.count("Use metric.") == 1
+    assert (
+        rendered.index("You are Kip.") < rendered.index("Be brief.") < rendered.index("Use metric.")
+    )
+
+    with pytest.raises(prompts.PromptError, match="over the"):
+        prompts.build_prompt(
+            [{"role": "user", "content": "hi"}],
+            system="x" * 200,
+            max_chars=100,
+        )
+
+
+def test_a_reused_chat_keeps_the_callers_system_prompt_and_tools():
+    """Turn two reuses the Gemini chat for the transcript, but still carries system + tools."""
+    first = [
+        {"role": "system", "content": "You are Kip, a careful assistant."},
+        {"role": "developer", "content": "Always cite line numbers."},
+        {"role": "user", "content": "first question"},
+    ]
+    second = [
+        *first,
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    tools = [_tool("shell")]
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": first, "tools": tools},
+        )
+        assert _recorder["metadata"] is None
+        first_prompt = _recorder["prompt"]
+
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": second, "tools": tools},
+        )
+        reused_metadata = _recorder["metadata"]
+        second_prompt = _recorder["prompt"]
+
+    assert reused_metadata == _FakeSession.metadata
+    assert "You are Kip, a careful assistant." in first_prompt
+    assert "You are Kip, a careful assistant." in second_prompt
+    assert second_prompt.count("You are Kip, a careful assistant.") == 1
+    assert second_prompt.count("Always cite line numbers.") == 1
+    assert "# Local tools" in second_prompt
+    assert '"name":"shell"' in second_prompt
+    assert "first question" not in second_prompt
+    assert "second question" in second_prompt
+
+
+def test_an_unmatched_chat_keeps_previous_full_history_and_system_behavior():
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "messages": [
+                    {"role": "system", "content": "You are Kip."},
+                    {"role": "user", "content": "first question"},
+                    {"role": "assistant", "content": "first answer"},
+                    {"role": "user", "content": "second question"},
+                ],
+            },
+        )
+        metadata = _recorder["metadata"]
+        prompt = _recorder["prompt"]
+    assert metadata is None
+    assert prompt.count("You are Kip.") == 1
+    assert "first question" in prompt
+    assert "first answer" in prompt
+    assert "second question" in prompt
+
+
+def test_replacing_system_prompt_mid_conversation_uses_the_new_instructions():
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "messages": [
+                    {"role": "system", "content": "Old rules."},
+                    {"role": "user", "content": "first question"},
+                ],
+            },
+        )
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "messages": [
+                    {"role": "system", "content": "New rules."},
+                    {"role": "user", "content": "first question"},
+                    {"role": "assistant", "content": "first answer"},
+                    {"role": "user", "content": "second question"},
+                ],
+            },
+        )
+        metadata = _recorder["metadata"]
+        prompt = _recorder["prompt"]
+    assert metadata is None
+    assert prompt.count("New rules.") == 1
+    assert "Old rules." not in prompt
+    assert "first question" in prompt
+    assert "second question" in prompt
+
+
+def test_appending_a_new_system_message_mid_conversation_reuses_chat_without_duplication():
+    first = [
+        {"role": "system", "content": "Base rules."},
+        {"role": "user", "content": "first question"},
+    ]
+    second = [
+        *first,
+        {"role": "assistant", "content": "first answer"},
+        {"role": "system", "content": "Project override."},
+        {"role": "user", "content": "second question"},
+    ]
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": first},
+        )
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": second},
+        )
+        metadata = _recorder["metadata"]
+        prompt = _recorder["prompt"]
+    assert metadata == _FakeSession.metadata
+    assert prompt.count("Base rules.") == 1
+    assert prompt.count("Project override.") == 1
+    assert prompt.index("Base rules.") < prompt.index("Project override.")
+    assert "first question" not in prompt
+    assert "second question" in prompt
+
+
+def test_reused_chat_image_footnote_counts_only_images_in_the_new_turn():
+    png = (
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    turn1 = [
+        {"role": "system", "content": "You are Kip."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this"},
+                {"type": "image_url", "image_url": {"url": png}},
+            ],
+        },
+    ]
+    turn2 = [
+        *turn1,
+        {"role": "assistant", "content": "I cannot see it."},
+        {"role": "user", "content": "okay, text only now"},
+    ]
+    turn3 = [
+        *turn2,
+        {"role": "assistant", "content": "sure"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "another one"},
+                {"type": "image_url", "image_url": {"url": png}},
+            ],
+        },
+    ]
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn1},
+        )
+        p1 = _recorder["prompt"]
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn2},
+        )
+        p2 = _recorder["prompt"]
+        m2 = _recorder["metadata"]
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn3},
+        )
+        p3 = _recorder["prompt"]
+        m3 = _recorder["metadata"]
+
+    assert "attached 1 image(s)" in p1
+    assert m2 == _FakeSession.metadata
+    assert p2.count("You are Kip.") == 1
+    assert "attached 1 image(s)" not in p2
+    assert m3 == _FakeSession.metadata
+    assert p3.count("You are Kip.") == 1
+    assert "attached 1 image(s)" in p3
+
+
+def test_temporary_turn_keeps_system_prompt_and_never_reuses():
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "temporary": True,
+                "messages": [
+                    {"role": "system", "content": "You are Kip."},
+                    {"role": "user", "content": "hold this"},
+                ],
+            },
+        )
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "temporary": True,
+                "messages": [
+                    {"role": "system", "content": "You are Kip."},
+                    {"role": "user", "content": "hold this"},
+                    {"role": "assistant", "content": "hello"},
+                    {"role": "user", "content": "and this"},
+                ],
+            },
+        )
+        prompt = _recorder["prompt"]
+        metadata = _recorder["metadata"]
+        chats = client.get("/v1/chats", headers=_auth()).json()["count"]
+    assert metadata is None
+    assert chats == 0
+    assert prompt.count("You are Kip.") == 1
+    assert "hold this" in prompt
+    assert "and this" in prompt
+
+
+def test_responses_route_keeps_instructions_on_reused_chats():
+    turn1 = [{"role": "user", "content": "first question"}]
+    turn2 = [
+        *turn1,
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    with _client() as client:
+        client.post(
+            "/v1/responses",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "instructions": "You are Kip.",
+                "input": turn1,
+            },
+        )
+        client.post(
+            "/v1/responses",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "instructions": "You are Kip.",
+                "input": turn2,
+            },
+        )
+        metadata = _recorder["metadata"]
+        prompt = _recorder["prompt"]
+    assert metadata == _FakeSession.metadata
+    assert prompt.count("You are Kip.") == 1
+    assert "first question" not in prompt
+    assert "second question" in prompt

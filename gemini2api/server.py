@@ -431,15 +431,29 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
         account_id = stored.account_id
         client = pool.client(account_id)
         metadata = stored.metadata
-        # Only what this chat has not already been told is sent to it.
+        # Only transcript messages this chat has not seen are sent; system/developer instructions
+        # are authoritative configuration and must accompany every turn.
         fresh = messages[stored.matched_messages :]
-        sent = prompts.build_prompt(
-            fresh or messages[-1:],
-            tools=tools,
-            tool_choice=choice,
-            response_format=response_format,
-            max_chars=pool.settings.max_prompt_chars,
-        )
+        if not any(
+            isinstance(m, dict) and m.get("role") not in {"system", "developer"} for m in fresh
+        ):
+            non_system = [
+                m
+                for m in messages
+                if isinstance(m, dict) and m.get("role") not in {"system", "developer"}
+            ]
+            fresh = non_system[-1:] or messages[-1:]
+        try:
+            sent = prompts.build_prompt(
+                fresh,
+                tools=tools,
+                tool_choice=choice,
+                response_format=response_format,
+                max_chars=pool.settings.max_prompt_chars,
+                system=prompts.extract_system(messages),
+            )
+        except prompts.PromptError as exc:
+            raise _error(400, str(exc)) from exc
     else:
         account_id, client = pool.next_client()
         metadata = None

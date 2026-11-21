@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -129,19 +130,58 @@ def build_tool_instruction(tools: list[dict[str, Any]], tool_choice: str | None)
     return "\n".join(lines)
 
 
+def extract_system(messages: list[dict[str, Any]]) -> list[str]:
+    """Collect non-empty system/developer instructions from a conversation, in order."""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            raise PromptError("each message must be an object")
+        if message.get("role") not in {"system", "developer"}:
+            continue
+        text = _content_text(message.get("content"))
+        stripped = text.strip()
+        if stripped and stripped not in seen:
+            seen.add(stripped)
+            parts.append(text)
+    return parts
+
+
 def build_prompt(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     tool_choice: str | None = None,
     response_format: dict[str, Any] | None = None,
     max_chars: int = 900_000,
+    system: str | Sequence[str] | None = None,
 ) -> str:
     """One Gemini user turn carrying the whole conversation.
 
     Nothing is summarised or dropped: a truncated transcript would let the model answer a
     different question than the one asked, so an oversized request is refused instead.
+    Explicit `system` instructions are prepended ahead of any system/developer messages inside
+    `messages`, with duplicate entries rendered only once.
     """
     system_parts: list[str] = []
+    seen_system: set[str] = set()
+
+    def add_system(text: str) -> None:
+        stripped = text.strip()
+        if stripped and stripped not in seen_system:
+            seen_system.add(stripped)
+            system_parts.append(text)
+
+    if system is not None:
+        if isinstance(system, str):
+            add_system(system)
+        elif isinstance(system, Sequence) and not isinstance(system, (bytes, bytearray)):
+            for part in system:
+                if not isinstance(part, str):
+                    raise PromptError("each system instruction must be a string")
+                add_system(part)
+        else:
+            raise PromptError("system must be a string or a sequence of strings")
+
     transcript: list[str] = []
     # A call id belongs to the assistant message that issued it; the results that follow refer
     # back to it by id only, so the ids are kept alongside the transcript for the model.
@@ -151,8 +191,7 @@ def build_prompt(
         role = message.get("role")
         text = _content_text(message.get("content"))
         if role in {"system", "developer"}:
-            if text.strip():
-                system_parts.append(text)
+            add_system(text)
             continue
         if role == "user":
             transcript.append(f"{USER_MARK}\n{text}")
@@ -190,7 +229,7 @@ def build_prompt(
     if not transcript:
         raise PromptError("at least one user or assistant message is required")
 
-    preamble = [part for part in system_parts if part.strip()]
+    preamble = list(system_parts)
     instruction = build_tool_instruction(tools or [], tool_choice)
     if instruction:
         preamble.append(instruction)
