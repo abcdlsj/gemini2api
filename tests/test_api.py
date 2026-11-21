@@ -186,6 +186,8 @@ def test_models_carry_the_metadata_a_client_needs_to_advertise_them():
     """Otherwise every caller invents a context window and a vision flag for itself."""
     with _client() as client:
         model = client.get("/v1/models", headers=_auth()).json()["data"][0]
+    # The picker should show the model, not Google's marketing phrase for it.
+    assert model["name"] == "gemini-pro-web"
     assert model["context_window"] == 225_000
     assert model["supports_reasoning"] is True
     # Images cannot reach Gemini yet, so claiming vision would be a lie; Kip reads this flag

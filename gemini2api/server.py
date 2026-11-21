@@ -155,7 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     _model_entry(
                         model,
                         f"{model['name']}{suffix}",
-                        f"{model['display_name']}{name_suffix}",
+                        f"{model['name']}{name_suffix}",
                         now,
                     )
                 )
@@ -167,11 +167,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "object": "model",
             "created": now,
             "owned_by": "google",
-            # Not an OpenAI field, but the reason to run this server: which account tiers
-            # can serve the model, and whether it is a subscription-only one.
-            # Also not OpenAI fields: what a client needs to advertise the model without
-            # asking the user to fill in numbers by hand.
-            "name": display,
+            # `name` stays the model id on purpose: a picker should show `gemini-neon`, not the
+            # marketing phrase Google attaches to it ("Deeper analysis"), which says nothing
+            # about which model is answering. The phrase is kept under `gemini.display_name`.
+            "name": model_id,
             "context_window": context_window,
             **capabilities,
             "gemini": {
