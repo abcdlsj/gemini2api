@@ -28,6 +28,12 @@ port: 8790
 chat_mode: "auto_delete"
 auto_delete_ttl: 86400
 
+# on_change | always
+#   on_change sends a short tool reminder (~200 chars) on reused chats when the tool set has not
+#   changed — a bet that the model remembers parameter names from earlier turns. A miss fails
+#   visibly in argument validation; set "always" to disable the bet and resend full schemas.
+tools_repeat: "on_change"
+
 default_thinking: false
 max_prompt_chars: 900000
 timeout: 450

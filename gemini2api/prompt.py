@@ -8,6 +8,7 @@ rather than trusted.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Sequence
@@ -17,6 +18,8 @@ from typing import Any
 TOOL_FENCE = "tool_call"
 MAX_TOOL_CALLS = 32
 MAX_TOOL_BYTES = 256 * 1024
+
+_TOOL_BLOCK_FORMAT = f'```{TOOL_FENCE}\n{{"name":"<tool name>","arguments":{{<json object>}}}}\n```'
 
 USER_MARK = "[User]"
 ASSISTANT_MARK = "[Assistant]"
@@ -93,40 +96,77 @@ def image_urls(content: Any) -> list[str]:
     return found
 
 
-def build_tool_instruction(tools: list[dict[str, Any]], tool_choice: str | None) -> str:
-    """The system-level explanation of the caller's function protocol."""
-    tools = normalise_tools(tools)
-    if not tools:
-        return ""
-    declarations = [
+def _canonical_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [
         {
             "name": tool["name"],
             "description": tool.get("description") or "",
             "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
         }
-        for tool in tools
+        for tool in normalise_tools(tools)
     ]
-    lines = [
-        "# Local tools",
-        "These functions run on the caller's machine. You cannot run them yourself.",
-        json.dumps(declarations, ensure_ascii=False, separators=(",", ":")),
-        "",
-        "To use one, reply with ONLY this block and nothing else, no code fence language tag:",
-        "```" + TOOL_FENCE,
-        '{"name":"<tool name>","arguments":{<json object matching that tool parameters>}}',
-        "```",
-        "Rules: emit one block per call, at most "
-        f"{MAX_TOOL_CALLS} per reply. `arguments` must be a JSON object. Never invent a tool "
-        "name, never guess a result, and never write the caller's results yourself. Stop right "
-        "after your last block so the caller can run them.",
-        "For an example of the syntax in prose, use a `json` fence instead.",
-    ]
+
+
+def tools_digest(tools: list[dict[str, Any]] | None) -> str:
+    """Stable digest of the declared tool set, independent of key or declaration order."""
+    declarations = sorted(_canonical_tools(tools), key=lambda item: item["name"])
+    if not declarations:
+        return ""
+    canonical = json.dumps(declarations, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _tool_choice_line(tool_choice: str | None) -> str | None:
     if tool_choice == "required":
-        lines.append("You MUST request at least one of the declared functions this turn.")
-    elif isinstance(tool_choice, str) and tool_choice not in {"auto", "none", "required"}:
-        lines.append(f"You MUST request only `{tool_choice}` this turn.")
-    elif tool_choice == "none":
-        lines.append("You MUST NOT request any function this turn; answer in prose.")
+        return "You MUST request at least one of the declared functions this turn."
+    if isinstance(tool_choice, str) and tool_choice not in {"auto", "none", "required"}:
+        return f"You MUST request only `{tool_choice}` this turn."
+    if tool_choice == "none":
+        return "You MUST NOT request any function this turn; answer in prose."
+    return None
+
+
+def build_tool_instruction(
+    tools: list[dict[str, Any]],
+    tool_choice: str | None,
+    *,
+    compact: bool = False,
+) -> str:
+    """The system-level explanation of the caller's function protocol.
+
+    When `compact=True` (used on reused chats whose tool set has not changed), only the tool names,
+    the fence format, and this turn's `tool_choice` constraint are emitted. This bets that the
+    model remembers parameter names from earlier in the chat; if it does not, failure is visible
+    through argument validation rather than silent, and `tools_repeat: always` disables the bet.
+    """
+    declarations = _canonical_tools(tools)
+    if not declarations:
+        return ""
+    if compact:
+        names = ", ".join(tool["name"] for tool in declarations)
+        lines = [
+            "# Local tools",
+            f"Same declarations as earlier in this chat: {names}.",
+            "Use one block per call:",
+            _TOOL_BLOCK_FORMAT,
+        ]
+    else:
+        lines = [
+            "# Local tools",
+            "These functions run on the caller's machine. You cannot run them yourself.",
+            json.dumps(declarations, ensure_ascii=False, separators=(",", ":")),
+            "",
+            "To use one, reply with ONLY this block and nothing else, no code fence language tag:",
+            _TOOL_BLOCK_FORMAT,
+            "Rules: emit one block per call, at most "
+            f"{MAX_TOOL_CALLS} per reply. `arguments` must be a JSON object. Never invent a tool "
+            "name, never guess a result, and never write the caller's results yourself. Stop right "
+            "after your last block so the caller can run them.",
+            "For an example of the syntax in prose, use a `json` fence instead.",
+        ]
+    choice_line = _tool_choice_line(tool_choice)
+    if choice_line:
+        lines.append(choice_line)
     return "\n".join(lines)
 
 
@@ -154,6 +194,7 @@ def build_prompt(
     response_format: dict[str, Any] | None = None,
     max_chars: int = 900_000,
     system: str | Sequence[str] | None = None,
+    compact_tools: bool = False,
 ) -> str:
     """One Gemini user turn carrying the whole conversation.
 
@@ -230,7 +271,7 @@ def build_prompt(
         raise PromptError("at least one user or assistant message is required")
 
     preamble = list(system_parts)
-    instruction = build_tool_instruction(tools or [], tool_choice)
+    instruction = build_tool_instruction(tools or [], tool_choice, compact=compact_tools)
     if instruction:
         preamble.append(instruction)
     structured = build_structured_instruction(response_format)

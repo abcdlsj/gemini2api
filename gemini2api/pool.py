@@ -62,6 +62,8 @@ class StoredChat:
     matched_messages: int = 0
     # Set when the chat was opened in auto_delete mode, so only those are ever deleted remotely.
     auto_delete: bool = False
+    # Stable digest of the tool set last declared in full to this chat.
+    tools_digest: str = ""
 
 
 class Pool:

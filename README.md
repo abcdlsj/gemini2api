@@ -224,6 +224,13 @@ declared in this request, and the arguments are an object. Anything else stays a
 truncated call is never executed. `tool_choice: required` that the model ignores is a `502`, not a
 silently empty turn.
 
+On reused chats, `tools_repeat: on_change` (the default; env `G2A_TOOLS_REPEAT`) sends full tool
+JSON schemas on the first turn and whenever the declared tool set changes, and a compact ~200-char
+reminder (tool names, fence format, and this turn's `tool_choice`) when the tool set is unchanged.
+This is a deliberate bet that the model remembers parameter names from earlier in the chat: if it
+forgets or hallucinates arguments, failure is visible via validation rather than silent. Set
+`tools_repeat: always` to turn off that bet and resend full declarations on every turn.
+
 ## Chat modes
 
 | `chat_mode` | Google account history | Context across turns |

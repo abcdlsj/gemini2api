@@ -11,6 +11,7 @@ from gemini_webapi.constants import AccountStatus
 
 from gemini2api import prompt as prompts
 from gemini2api.config import Account, Settings
+from gemini2api.config import load as load_config
 from gemini2api.pool import history_key
 from gemini2api.server import create_app
 
@@ -782,7 +783,11 @@ def test_a_reused_chat_keeps_the_callers_system_prompt_and_tools():
     assert second_prompt.count("You are Kip, a careful assistant.") == 1
     assert second_prompt.count("Always cite line numbers.") == 1
     assert "# Local tools" in second_prompt
-    assert '"name":"shell"' in second_prompt
+    assert "shell" in second_prompt
+    assert "```tool_call" in second_prompt
+    assert second_prompt.index("You are Kip, a careful assistant.") < second_prompt.index(
+        "# Local tools"
+    )
     assert "first question" not in second_prompt
     assert "second question" in second_prompt
 
@@ -1010,3 +1015,207 @@ def test_responses_route_keeps_instructions_on_reused_chats():
     assert prompt.count("You are Kip.") == 1
     assert "first question" not in prompt
     assert "second question" in prompt
+
+
+# -- compact tool reminder on reused chats ------------------------------------------------
+
+
+def test_reused_chat_with_unchanged_tools_sends_compact_reminder():
+    shell_a = _tool("shell", {"type": "object", "properties": {"cmd": {"type": "string"}}})
+    read_a = _tool("read_file", {"type": "object", "properties": {"path": {"type": "string"}}})
+    # Same tool set, different declaration order and key order: digest must match.
+    read_b = _tool("read_file", {"properties": {"path": {"type": "string"}}, "type": "object"})
+    shell_b = _tool("shell", {"properties": {"cmd": {"type": "string"}}, "type": "object"})
+
+    turn1 = [
+        {"role": "system", "content": "You are Kip."},
+        {"role": "user", "content": "first question"},
+    ]
+    turn2 = [
+        *turn1,
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn1, "tools": [shell_a, read_a]},
+        )
+        first_prompt = _recorder["prompt"]
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn2, "tools": [read_b, shell_b]},
+        )
+        second_prompt = _recorder["prompt"]
+        reused_metadata = _recorder["metadata"]
+
+    assert reused_metadata == _FakeSession.metadata
+    assert '"parameters"' in first_prompt
+    assert "parameters" not in second_prompt
+    assert "shell" in second_prompt
+    assert "read_file" in second_prompt
+    assert "```tool_call" in second_prompt
+    assert (
+        second_prompt.index("[System instructions]")
+        < second_prompt.index("You are Kip.")
+        < second_prompt.index("# Local tools")
+        < second_prompt.index("[Conversation]")
+    )
+    compact_section = prompts.build_tool_instruction([read_b, shell_b], None, compact=True)
+    assert len(compact_section) < 250
+
+
+def test_reused_chat_resends_full_tools_when_tool_set_changes():
+    shell = _tool("shell", {"type": "object", "properties": {"cmd": {"type": "string"}}})
+    read_file = _tool("read_file", {"type": "object", "properties": {"path": {"type": "string"}}})
+    turn1 = [
+        {"role": "system", "content": "You are Kip."},
+        {"role": "user", "content": "turn 1"},
+    ]
+    turn2 = [*turn1, {"role": "assistant", "content": "a1"}, {"role": "user", "content": "turn 2"}]
+    turn3 = [*turn2, {"role": "assistant", "content": "a2"}, {"role": "user", "content": "turn 3"}]
+
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn1, "tools": [shell]},
+        )
+        p1 = _recorder["prompt"]
+
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn2, "tools": [shell, read_file]},
+        )
+        p2 = _recorder["prompt"]
+        m2 = _recorder["metadata"]
+
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn3, "tools": [shell, read_file]},
+        )
+        p3 = _recorder["prompt"]
+        m3 = _recorder["metadata"]
+
+    assert '"parameters"' in p1
+    assert m2 == _FakeSession.metadata
+    assert '"parameters"' in p2
+    assert '"name":"read_file"' in p2
+    assert m3 == _FakeSession.metadata
+    assert "parameters" not in p3
+    assert "shell" in p3
+    assert "read_file" in p3
+
+
+def test_tools_repeat_always_sends_full_tools_on_reused_chats():
+    settings = _settings()
+    settings.tools_repeat = "always"
+    tools = [_tool("shell", {"type": "object", "properties": {"cmd": {"type": "string"}}})]
+    turn1 = [{"role": "user", "content": "first"}]
+    turn2 = [*turn1, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "second"}]
+    with _client(settings) as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn1, "tools": tools},
+        )
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn2, "tools": tools},
+        )
+        prompt = _recorder["prompt"]
+        metadata = _recorder["metadata"]
+    assert metadata == _FakeSession.metadata
+    assert '"parameters"' in prompt
+    assert '"name":"shell"' in prompt
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "expected_phrase", "reply"),
+    [
+        (
+            "required",
+            "MUST request at least one",
+            '```tool_call\n{"name":"shell","arguments":{}}\n```',
+        ),
+        (
+            {"type": "function", "function": {"name": "shell"}},
+            "MUST request only `shell`",
+            '```tool_call\n{"name":"shell","arguments":{}}\n```',
+        ),
+        (
+            "none",
+            "MUST NOT request any function",
+            "plain prose answer",
+        ),
+    ],
+)
+def test_compact_tool_reminder_keeps_tool_choice_constraints(tool_choice, expected_phrase, reply):
+    tools = [_tool("shell"), _tool("read_file")]
+    turn1 = [{"role": "user", "content": "first"}]
+    turn2 = [*turn1, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "second"}]
+    with _client() as client:
+        client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={"model": "gemini-pro-web", "messages": turn1, "tools": tools},
+        )
+        _recorder["reply"] = reply
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_auth(),
+            json={
+                "model": "gemini-pro-web",
+                "messages": turn2,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            },
+        )
+        prompt = _recorder["prompt"]
+        metadata = _recorder["metadata"]
+    assert response.status_code == 200
+    assert metadata == _FakeSession.metadata
+    assert "parameters" not in prompt
+    assert expected_phrase in prompt
+
+
+def test_config_load_defaults_and_rejects_invalid_tools_repeat(tmp_path, monkeypatch):
+    monkeypatch.delenv("G2A_TOOLS_REPEAT", raising=False)
+    monkeypatch.delenv("G2A_SECURE_1PSID", raising=False)
+
+    valid_cfg = tmp_path / "valid.yaml"
+    valid_cfg.write_text('accounts:\n  - id: a\n    secure_1psid: "psid"\n', encoding="utf-8")
+    assert load_config(valid_cfg).tools_repeat == "on_change"
+
+    bad_cfg = tmp_path / "bad.yaml"
+    bad_cfg.write_text(
+        'accounts:\n  - id: a\n    secure_1psid: "psid"\ntools_repeat: "never"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="tools_repeat"):
+        load_config(bad_cfg)
+
+    monkeypatch.setenv("G2A_TOOLS_REPEAT", "sometimes")
+    with pytest.raises(ValueError, match="tools_repeat"):
+        load_config(valid_cfg)
+
+
+def test_compact_tool_prompt_still_enforces_max_chars():
+    tools = [_tool("shell"), _tool("read_file")]
+    compact = prompts.build_prompt(
+        [{"role": "user", "content": "hi"}],
+        tools=tools,
+        compact_tools=True,
+    )
+    with pytest.raises(prompts.PromptError, match="over the"):
+        prompts.build_prompt(
+            [{"role": "user", "content": "hi"}],
+            tools=tools,
+            compact_tools=True,
+            max_chars=len(compact) - 1,
+        )

@@ -427,6 +427,7 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
 
     temporary = _temporary_flag(body, pool.settings)
     stored = None if temporary else pool.find_chat(model, messages)
+    current_tools_digest = prompts.tools_digest(tools)
     if stored is not None:
         account_id = stored.account_id
         client = pool.client(account_id)
@@ -443,6 +444,11 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
                 if isinstance(m, dict) and m.get("role") not in {"system", "developer"}
             ]
             fresh = non_system[-1:] or messages[-1:]
+        compact_tools = (
+            pool.settings.tools_repeat == "on_change"
+            and bool(current_tools_digest)
+            and stored.tools_digest == current_tools_digest
+        )
         try:
             sent = prompts.build_prompt(
                 fresh,
@@ -451,6 +457,7 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
                 response_format=response_format,
                 max_chars=pool.settings.max_prompt_chars,
                 system=prompts.extract_system(messages),
+                compact_tools=compact_tools,
             )
         except prompts.PromptError as exc:
             raise _error(400, str(exc)) from exc
@@ -511,6 +518,7 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
             model=model,
             turns=(stored.turns + 1) if stored else 1,
             auto_delete=pool.settings.chat_mode == "auto_delete",
+            tools_digest=current_tools_digest,
         ),
     )
     if stored is not None and history_key(model, messages) != history_key(
@@ -518,6 +526,7 @@ async def _run_turn(pool: Pool, body: dict[str, Any], *, endpoint: str) -> dict[
     ):
         stored.metadata = metadata
         stored.turns += 1
+        stored.tools_digest = current_tools_digest
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",

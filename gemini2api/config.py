@@ -72,6 +72,11 @@ class Settings:
     # may close the window at any time and silently drop context.
     chat_mode: str = "auto_delete"
     auto_delete_ttl: int = 86400
+    # "on_change" sends a short tool reminder (~200 chars) on reused chats when the tool set is
+    # unchanged, betting the model remembers parameter names from earlier turns; a miss fails
+    # visibly during validation. Set "always" to disable that bet and resend full schemas every
+    # turn.
+    tools_repeat: str = "on_change"
     default_thinking: bool = False
     max_prompt_chars: int = 900_000
     # How long to wait on Google before giving up on one turn.
@@ -160,6 +165,7 @@ def load(path: str | Path | None = None) -> Settings:
         port=_env("PORT", raw.get("port", 8790), int),
         chat_mode=_env("CHAT_MODE", raw.get("chat_mode", "auto_delete"), str),
         auto_delete_ttl=_env("AUTO_DELETE_TTL", raw.get("auto_delete_ttl", 86400), int),
+        tools_repeat=_env("TOOLS_REPEAT", raw.get("tools_repeat", "on_change"), str),
         default_thinking=_env("DEFAULT_THINKING", raw.get("default_thinking", False), bool),
         max_prompt_chars=_env("MAX_PROMPT_CHARS", raw.get("max_prompt_chars", 900_000), int),
         timeout=float(_env("TIMEOUT", raw.get("timeout", 450.0), str)),
@@ -170,4 +176,6 @@ def load(path: str | Path | None = None) -> Settings:
         raise ValueError(
             f"chat_mode must be normal, temporary or auto_delete, got {settings.chat_mode!r}"
         )
+    if settings.tools_repeat not in {"always", "on_change"}:
+        raise ValueError(f"tools_repeat must be always or on_change, got {settings.tools_repeat!r}")
     return settings
