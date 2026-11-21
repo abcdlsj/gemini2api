@@ -157,6 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # can serve the model, and whether it is a subscription-only one.
                 # Also not OpenAI fields: what a client needs to advertise the model without
                 # asking the user to fill in numbers by hand.
+                "name": model["display_name"],
                 "context_window": context_window,
                 **capabilities,
                 "gemini": {
