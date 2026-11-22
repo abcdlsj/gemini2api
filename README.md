@@ -48,6 +48,10 @@ checks the published digest, imports the Firefox cookies, writes a config with a
 starts it on loopback. Building the binary yourself is two commands; see
 [`packaging/README.md`](packaging/README.md).
 
+Kip's plugin does not re-implement any of this: it reads Firefox cookies through
+[`integrations/kip/cookies.ts`](integrations/kip/cookies.ts), which it vendors verbatim and pins by
+commit and digest, and it starts the binary with the config and key it generates.
+
 ### From source
 
 ```sh
