@@ -8,3 +8,5 @@ cookie*.txt
 .ruff_cache/
 *.egg-info/
 **/.gemini2api-state/
+build/
+dist/

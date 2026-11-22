@@ -1,0 +1,124 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra dev
+      - run: uv run pytest -q
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: macos-arm64
+            binary: gemini2api
+            ext: ""
+          - os: macos-15-intel
+            target: macos-x64
+            binary: gemini2api
+            ext: ""
+          - os: windows-latest
+            target: win-x64
+            binary: gemini2api.exe
+            ext: ".exe"
+          - os: ubuntu-latest
+            target: linux-x64
+            binary: gemini2api
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build
+        run: |
+          uv sync
+          uv pip install pyinstaller
+          uv run pyinstaller --noconfirm --clean packaging/gemini2api.spec
+      - name: Name, hash, and describe the artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="gemini2api-${{ matrix.target }}${{ matrix.ext }}"
+          mkdir -p release fragments
+          cp "dist/${{ matrix.binary }}" "release/${NAME}"
+          python - "$VERSION" "${{ matrix.target }}" "${NAME}" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+
+          version, target, name = sys.argv[1:4]
+          path = Path("release") / name
+          data = path.read_bytes()
+          fragment = {
+              "target": target,
+              "file": name,
+              "url": f"https://github.com/{__import__('os').environ['GITHUB_REPOSITORY']}/releases/download/v{version}/{name}",
+              "sha256": hashlib.sha256(data).hexdigest(),
+              "size": len(data),
+          }
+          Path("fragments", f"{target}.json").write_text(json.dumps(fragment, indent=2) + "\n")
+          Path("fragments", "version.txt").write_text(version)
+          print(json.dumps(fragment, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            release/*
+            fragments/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Assemble manifest.json
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("artifacts")
+          fragments = sorted(root.glob("*.json")) if not (root / "fragments").is_dir() else sorted((root / "fragments").glob("*.json"))
+          version_file = root / "version.txt"
+          if not version_file.is_file():
+              version_file = root / "fragments" / "version.txt"
+          version = version_file.read_text().strip()
+          artifacts = {}
+          for path in fragments:
+              fragment = json.loads(path.read_text())
+              artifacts[fragment["target"]] = {
+                  "file": fragment["file"],
+                  "url": fragment["url"],
+                  "sha256": fragment["sha256"],
+                  "size": fragment["size"],
+              }
+          Path("manifest.json").write_text(
+              json.dumps({"version": version, "artifacts": artifacts}, indent=2) + "\n"
+          )
+          print(Path("manifest.json").read_text())
+          PY
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || true
+          find artifacts -type f \( -name 'gemini2api*' \) -exec gh release upload "$GITHUB_REF_NAME" {} --clobber \;
+          gh release upload "$GITHUB_REF_NAME" manifest.json --clobber

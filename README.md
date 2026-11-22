@@ -30,6 +30,26 @@ It runs your signed-in subscription account through
 
 ## Install
 
+### Standalone binary
+
+Every release carries one self-contained binary per platform plus a `manifest.json` with the
+`sha256` of each. No Python is needed, and the CLI is unchanged (`gemini2api cookies --write`
+works in the frozen build too).
+
+| platform | asset |
+| --- | --- |
+| macOS arm64 | `gemini2api-macos-arm64` |
+| macOS x64 | `gemini2api-macos-x64` |
+| Windows x64 | `gemini2api-win-x64.exe` |
+| Linux x64 | `gemini2api-linux-x64` |
+
+Kip's gemini2api plugin installs one this way: it downloads the artifact for its platform,
+checks the published digest, imports the Firefox cookies, writes a config with a random key and
+starts it on loopback. Building the binary yourself is two commands; see
+[`packaging/README.md`](packaging/README.md).
+
+### From source
+
 ```sh
 git clone git@github.com:abcdlsj/gemini2api.git
 cd gemini2api
@@ -258,5 +278,7 @@ forgets or hallucinates arguments, failure is visible via validation rather than
 
 ## License
 
-MIT for this code. It depends on `gemini-webapi`, which is **AGPL-3.0** — running this as a
-network service for other people carries that library's obligations. Personal use is unaffected.
+AGPL-3.0. The dependency that does the actual talking to Google, `gemini-webapi`, is AGPL-3.0,
+so this project is licensed the same way. Running it as a network service for other people
+carries that license's source-offer obligations; personal use is unaffected. Binaries Kip
+downloads come from this project's own releases, so the source is shipped beside them.

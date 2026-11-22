@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -26,7 +27,6 @@ from typing import Any
 
 import yaml
 
-FIREFOX_ROOT = Path.home() / "Library/Application Support/Firefox"
 # Every Google cookie is taken, not a chosen subset: probing showed that hand-picked sets which
 # look sufficient (the PSID pair, or the classic SID family) are still bounced to ServiceLogin,
 # while the whole jar the browser actually holds is accepted. Only analytics are dropped.
@@ -34,12 +34,34 @@ DROPPED = {"_ga", "_gcl_au", "_ga_WC57KJ50ZZ"}
 GOOGLE_HOSTS = {".google.com", "accounts.google.com", "gemini.google.com"}
 
 
-def firefox_profiles(root: Path = FIREFOX_ROOT) -> list[Path]:
+def firefox_roots() -> list[Path]:
+    """Where Firefox keeps its profiles on this platform."""
+    home = Path.home()
+    if sys.platform == "darwin":
+        return [home / "Library" / "Application Support" / "Firefox"]
+    if sys.platform == "win32":
+        appdata = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
+        return [appdata / "Mozilla" / "Firefox"]
+    # Debian/Fedora and the Snap package keep separate roots.
+    return [
+        home / ".mozilla" / "firefox",
+        home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
+    ]
+
+
+def firefox_profiles(root: Path | None = None) -> list[Path]:
     """Every Firefox profile that holds a cookie database, newest last."""
-    if not root.is_dir():
-        return []
-    profiles = [path.parent for path in root.glob("Profiles/*/cookies.sqlite")]
-    return sorted(profiles, key=lambda path: (path / "cookies.sqlite").stat().st_mtime)
+    roots = [root] if root is not None else firefox_roots()
+    profiles: list[Path] = []
+    for base in roots:
+        if not base.is_dir():
+            continue
+        # `Profiles/*` on every platform; a flat `*.default*` layout still shows up in
+        # older Linux installs, so both are considered.
+        profiles.extend(path.parent for path in base.glob("Profiles/*/cookies.sqlite"))
+        profiles.extend(path.parent for path in base.glob("*.default*/cookies.sqlite"))
+    unique = {path.resolve(): path for path in profiles}
+    return sorted(unique.values(), key=lambda path: (path / "cookies.sqlite").stat().st_mtime)
 
 
 def read_firefox(profile: Path) -> dict[str, str]:
