@@ -14,14 +14,19 @@ from .config import load
 
 def main() -> int:
     # A frozen binary has no `python -m`, so the helpers dispatch through argv.
-    if len(sys.argv) > 1 and sys.argv[1] in {"cookies", "doctor"}:
-        if sys.argv[1] == "cookies":
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        if cmd in {"-h", "--help"}:
+            print("usage: gemini2api [cookies ... | doctor]")
+            return 0
+        if cmd == "cookies":
             from .cookies import main as cookies_main
 
             return cookies_main(sys.argv[2:])
-        from .doctor import main as doctor_main
+        if cmd == "doctor":
+            from .doctor import main as doctor_main
 
-        return doctor_main()
+            return doctor_main()
 
     try:
         settings = load()

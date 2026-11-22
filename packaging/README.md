@@ -1,12 +1,13 @@
 # Standalone binary
 
 Kip looks for one release asset per platform plus a manifest. The contract is small on
-purpose; see `docs/binary.md` for how the Kip plugin consumes it.
+purpose: the gemini2api plugin in Kip downloads the artifact for its platform, verifies the
+sha256 from `manifest.json`, and only then runs it.
 
 ```sh
 uv sync
 uv pip install pyinstaller
-uv run pyinstaller --noconfirm --clean packaging/gemini2api.spec
+uv run --no-sync pyinstaller --noconfirm --clean packaging/gemini2api.spec
 ./dist/gemini2api --help      # or: ./dist/gemini2api cookies --write
 ```
 

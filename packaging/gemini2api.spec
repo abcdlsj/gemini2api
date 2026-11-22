@@ -8,17 +8,19 @@ Two things are load-bearing:
 * `collect_all("curl_cffi")` gathers libcurl-impersonate and its shared objects.
   Without it the frozen binary imports but cannot open a TLS connection.
 
-Build with: `uv run pyinstaller --noconfirm --clean packaging/gemini2api.spec`
+Build with: `uv run --no-sync pyinstaller --noconfirm --clean packaging/gemini2api.spec`
 """
 
+import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 PACKAGING = Path(SPECPATH).resolve()
 ROOT = PACKAGING.parent
 
 curl_datas, curl_binaries, curl_hidden = collect_all("curl_cffi")
+certifi_datas = collect_data_files("certifi")
 
 hiddenimports = [
     *curl_hidden,
@@ -26,14 +28,14 @@ hiddenimports = [
     *collect_submodules("uvicorn"),
     "gemini2api.cookies",
     "gemini2api.doctor",
-    "win32_setctime",
+    *(["win32_setctime", "colorama"] if sys.platform == "win32" else []),
 ]
 
 analysis = Analysis(
     [str(PACKAGING / "entry.py")],
     pathex=[str(ROOT)],
     binaries=curl_binaries,
-    datas=curl_datas,
+    datas=[*curl_datas, *certifi_datas],
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],

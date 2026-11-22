@@ -46,7 +46,7 @@ jobs:
         run: |
           uv sync
           uv pip install pyinstaller
-          uv run pyinstaller --noconfirm --clean packaging/gemini2api.spec
+          uv run --no-sync pyinstaller --noconfirm --clean packaging/gemini2api.spec
       - name: Name, hash, and describe the artifact
         shell: bash
         run: |
@@ -55,7 +55,7 @@ jobs:
           NAME="gemini2api-${{ matrix.target }}${{ matrix.ext }}"
           mkdir -p release fragments
           cp "dist/${{ matrix.binary }}" "release/${NAME}"
-          python - "$VERSION" "${{ matrix.target }}" "${NAME}" <<'PY'
+          uv run --no-sync python - "$VERSION" "${{ matrix.target }}" "${NAME}" <<'PY'
           import hashlib, json, sys
           from pathlib import Path
 
@@ -90,7 +90,7 @@ jobs:
           merge-multiple: true
       - name: Assemble manifest.json
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           from pathlib import Path
 
@@ -117,8 +117,12 @@ jobs:
       - name: Upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || true
-          find artifacts -type f \( -name 'gemini2api*' \) -exec gh release upload "$GITHUB_REF_NAME" {} --clobber \;
-          gh release upload "$GITHUB_REF_NAME" manifest.json --clobber
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+          mapfile -t binaries < <(find artifacts -type f -name 'gemini2api*')
+          test "${#binaries[@]}" -gt 0
+          gh release upload "$GITHUB_REF_NAME" "${binaries[@]}" manifest.json --clobber

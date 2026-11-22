@@ -42,10 +42,11 @@ def firefox_roots() -> list[Path]:
     if sys.platform == "win32":
         appdata = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
         return [appdata / "Mozilla" / "Firefox"]
-    # Debian/Fedora and the Snap package keep separate roots.
+    # Debian/Fedora, Snap, and Flatpak packages keep separate roots.
     return [
         home / ".mozilla" / "firefox",
         home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
+        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
     ]
 
 
@@ -56,10 +57,9 @@ def firefox_profiles(root: Path | None = None) -> list[Path]:
     for base in roots:
         if not base.is_dir():
             continue
-        # `Profiles/*` on every platform; a flat `*.default*` layout still shows up in
-        # older Linux installs, so both are considered.
+        # `Profiles/*` on macOS/Windows; a flat `<profile>/` layout on Linux.
         profiles.extend(path.parent for path in base.glob("Profiles/*/cookies.sqlite"))
-        profiles.extend(path.parent for path in base.glob("*.default*/cookies.sqlite"))
+        profiles.extend(path.parent for path in base.glob("*/cookies.sqlite"))
     unique = {path.resolve(): path for path in profiles}
     return sorted(unique.values(), key=lambda path: (path / "cookies.sqlite").stat().st_mtime)
 
@@ -74,10 +74,15 @@ def read_firefox(profile: Path) -> dict[str, str]:
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "cookies.sqlite"
         shutil.copy(source, target)
-        for suffix in ("-wal", "-shm"):
-            sidecar = source.with_name(source.name + suffix)
-            if sidecar.is_file():
-                shutil.copy(sidecar, target.with_name(target.name + suffix))
+        # Copy `-wal` so uncommitted writes are visible, but skip `-shm`: it belongs to
+        # Firefox's live process (and can be locked on Windows), and SQLite rebuilds it
+        # cleanly on our private copy.
+        wal = source.with_name(source.name + "-wal")
+        try:
+            if wal.is_file():
+                shutil.copy(wal, target.with_name(target.name + "-wal"))
+        except FileNotFoundError:
+            pass
         connection = sqlite3.connect(target)
         try:
             rows = connection.execute(
@@ -105,17 +110,28 @@ def pick_profile(explicit: Path | None = None) -> dict[str, Any]:
         )
     best: tuple[int, Path, dict[str, str]] | None = None
     for profile in candidates:
-        cookies = read_firefox(profile)
+        try:
+            cookies = read_firefox(profile)
+        except (sqlite3.DatabaseError, OSError):
+            if explicit is not None:
+                raise
+            continue
+        if "__Secure-1PSID" not in cookies:
+            continue
         score = len(cookies)
         if best is None or score > best[0]:
             best = (score, profile, cookies)
-    assert best is not None
-    score, profile, cookies = best
-    if "__Secure-1PSID" not in cookies:
+    if best is None:
+        if explicit is not None:
+            raise SystemExit(
+                f"{explicit} has no Gemini session cookies. Sign in to gemini.google.com in that "
+                "Firefox profile first."
+            )
         raise SystemExit(
-            f"{profile} has no Gemini session cookies. Sign in to gemini.google.com in that "
-            "Firefox profile first."
+            "no Firefox profile has Gemini session cookies. Sign in to gemini.google.com in "
+            "Firefox first."
         )
+    score, profile, cookies = best
     return {"profile": str(profile), "cookies": cookies, "count": score}
 
 
